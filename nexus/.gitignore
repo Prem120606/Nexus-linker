@@ -1,12 +1,41 @@
-# Never publish these: keys, certificates, database, logs, user files
-venv/
-__pycache__/
-*.pyc
+# --- Secrets and private data: NEVER commit ---
 data/
 uploads/
 shared/
-*.db
 *.key
-*.crt
 *.pem
+*.crt
+*.p12
+*.pfx
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
 .env
+.env.*
+secret*.txt
+
+# --- Logs and backups ---
+*.log
+logs/
+backups/
+
+# --- Python ---
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

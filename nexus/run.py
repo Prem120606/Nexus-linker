@@ -14,7 +14,60 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 
+REQUIRED = [
+    'app/config.py',
+    'app/database/db.py',
+    'app/deps.py',
+    'app/main.py',
+    'app/pages.py',
+    'app/routes/devices.py',
+    'app/routes/files.py',
+    'app/routes/live.py',
+    'app/routes/messages.py',
+    'app/routes/pairing.py',
+    'app/routes/security.py',
+    'app/routes/setup.py',
+    'app/security.py',
+    'app/services/audit_service.py',
+    'app/services/auth_service.py',
+    'app/services/file_service.py',
+    'app/services/live_service.py',
+    'app/services/pairing_service.py',
+    'app/services/ratelimit.py',
+    'app/services/secrets_service.py',
+    'app/services/tls_service.py',
+    'app/services/transfer_service.py',
+    'app/static/css/nexus.css',
+    'app/static/js/common.js',
+    'app/templates/chat.html',
+    'app/templates/files.html',
+    'app/templates/index.html',
+    'app/templates/pair.html',
+    'app/templates/pairing.html',
+    'app/templates/shell.html',
+]
+
+
+def preflight() -> None:
+    """Fail with a clear message if the folder is incomplete (bad unzip, files in the wrong place)."""
+    for pkg in ("app", "app/routes", "app/services", "app/database", "app/tests"):
+        d = ROOT / pkg
+        if d.is_dir() and not (d / "__init__.py").exists():
+            (d / "__init__.py").write_text("")           # self-heal: empty package markers
+    missing = [f for f in REQUIRED if not (ROOT / f).is_file()]
+    if missing:
+        print("\n  NEXUS cannot start: this folder is incomplete.")
+        print(f"  Running from: {ROOT}")
+        print(f"  Missing {len(missing)} file(s), for example:")
+        for f in missing[:8]:
+            print("    -", f.replace("/", "\\"))
+        print("\n  Fix: delete this folder, extract the FULL nexus-secure.zip again (right-click > Extract All),")
+        print("  and make sure run.py and the 'app' folder sit side by side. Do not extract it inside another nexus folder.")
+        sys.exit(3)
+
+
 def serve() -> None:
+    preflight()
     import uvicorn
     from starlette.applications import Starlette
     from starlette.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
@@ -105,7 +158,7 @@ def supervise() -> None:
                 proc.kill()
             print("\n  NEXUS stopped.")
             return
-        if code == 0:
+        if code in (0, 3):                 # 0 = clean stop, 3 = incomplete install (restarting cannot help)
             return
         now = time.time()
         crashes = [t for t in crashes if now - t < 120] + [now]
