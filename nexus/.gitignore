@@ -1,0 +1,12 @@
+# Never publish these: keys, certificates, database, logs, user files
+venv/
+__pycache__/
+*.pyc
+data/
+uploads/
+shared/
+*.db
+*.key
+*.crt
+*.pem
+.env

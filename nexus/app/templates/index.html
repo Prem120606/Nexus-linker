@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e1c">
+<title>NEXUS</title>
+<link rel="stylesheet" href="/static/css/nexus.css">
+</head><body>
+<main class="app">
+  <header class="top">
+    <div class="logo">N</div>
+    <div><h1>NEXUS</h1><span class="muted">Phone ⇄ Laptop link</span></div>
+    <span id="state" class="pill">Checking</span>
+  </header>
+
+  <section class="card hero">
+    <span class="muted">Connected as</span>
+    <h2 id="who">Checking…</h2>
+    <p id="sub" class="muted"></p>
+    <div class="row" id="actions"></div>
+  </section>
+
+  <section class="card" id="dash" hidden>
+    <h2>Laptop status <span id="net" class="pill" style="margin-left:6px">Connecting</span></h2>
+    <div class="stat"><span>CPU</span><b id="cpuT">–</b></div>
+    <div class="meter" id="cpuM"><i></i></div>
+    <div class="stat"><span>Memory</span><b id="ramT">–</b></div>
+    <div class="meter" id="ramM"><i></i></div>
+    <div class="stat"><span>Disk</span><b id="diskT">–</b></div>
+    <div class="meter" id="diskM"><i></i></div>
+    <div class="facts">
+      <div class="fact">Battery<b id="batT">–</b></div>
+      <div class="fact">Phones online<b id="devT">–</b></div>
+      <div class="fact">Server uptime<b id="upT">–</b></div>
+      <div class="fact">Last sync<b id="syncT">–</b></div>
+    </div>
+  </section>
+
+  <section class="card" id="recent" hidden>
+    <h2>Recent transfers</h2>
+    <div id="recentList"></div>
+  </section>
+
+  <section class="grid">
+    <a class="tile" href="/chat"><span class="ico">💬</span><b>Chat</b><small>Text both ways</small></a>
+    <a class="tile" href="/files"><span class="ico">📁</span><b>Files</b><small>Send and receive</small></a>
+  </section>
+</main>
+<nav id="tabs"></nav>
+
+<script src="/static/js/common.js"></script>
+<script>
+const onLaptop = ["127.0.0.1", "localhost"].includes(location.hostname);
+
+function meter(id, pct) {
+  const m = $(id);
+  m.firstElementChild.style.width = pct + "%";
+  m.classList.toggle("warn", pct >= 85);
+}
+const fmtUp = s => s < 3600 ? Math.floor(s / 60) + " min"
+  : Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " m";
+
+function showStatus(s) {
+  $("cpuT").textContent = s.cpu.toFixed(0) + "%";   meter("cpuM", s.cpu);
+  $("ramT").textContent = s.ram.toFixed(0) + "%";   meter("ramM", s.ram);
+  $("diskT").textContent = s.disk.toFixed(0) + "%"; meter("diskM", s.disk);
+  $("batT").textContent = s.battery === null ? "No battery" : s.battery + "%" + (s.plugged ? " ⚡" : "");
+  $("devT").textContent = s.devices_online;
+  $("upT").textContent = fmtUp(s.uptime);
+  $("syncT").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+const ICON = { upload: "⬆", download: "⬇", share: "📤" };
+function note(box, text) {
+  box.replaceChildren();
+  const p = document.createElement("p"); p.className = "muted"; p.textContent = text; box.appendChild(p);
+}
+async function loadRecent() {
+  const r = await api("/api/files/history");
+  if (!r.ok) return;
+  $("recent").hidden = false;
+  const box = $("recentList");
+  if (!r.data.length) return note(box, "No transfers yet.");
+  box.replaceChildren();
+  for (const t of r.data.slice(0, 4)) {
+    const row = document.createElement("div"); row.className = "item";
+    const left = document.createElement("span"); left.className = "name";
+    left.textContent = `${ICON[t.direction] || "•"} ${t.filename} (${fmtSize(t.size)})`;
+    const right = document.createElement("span");
+    right.className = t.status === "completed" ? "ok-t" : "bad-t";
+    right.textContent = t.status;
+    row.append(left, right); box.appendChild(row);
+  }
+}
+
+let poller = null;
+function startLive() {
+  $("dash").hidden = false;
+  loadRecent();
+
+  // Backup: plain HTTP numbers, so the dashboard works even if the live link is down
+  const fallback = async () => {
+    const r = await api("/api/status");
+    if (r.ok) showStatus(r.data);
+  };
+  fallback();                                    // numbers appear immediately
+  live({
+    open:   () => { setPill($("net"), "Live", "ok"); clearInterval(poller); poller = null; },
+    close:  () => { setPill($("net"), "Reconnecting", "bad"); if (!poller) poller = setInterval(fallback, 3000); },
+    denied: () => location.reload(),
+    status: showStatus,
+    files:  loadRecent,
+  });
+}
+
+(async () => {
+  const r = await api("/api/me");
+  const actions = $("actions");
+  if (r.ok) {
+    $("who").textContent = r.data.device;
+    $("sub").textContent = r.data.trusted ? "Trusted device (30 days)" : "Temporary session (8 hours)";
+    setPill($("state"), "Paired", "ok");
+    const b = document.createElement("button");
+    b.className = "btn ghost sm"; b.textContent = "Disconnect this device";
+    b.onclick = async () => { await api("/api/devices/disconnect", "POST"); location.reload(); };
+    actions.appendChild(b);
+    startLive();
+  } else if (onLaptop) {
+    $("who").textContent = "This laptop";
+    $("sub").textContent = "Open the pairing panel to link your phone.";
+    setPill($("state"), "Server online", "ok");
+    const a = document.createElement("a");
+    a.className = "btn sm"; a.href = "/pairing"; a.textContent = "Open pairing panel";
+    actions.appendChild(a);
+    startLive();
+  } else {
+    $("who").textContent = "Not paired";
+    $("sub").textContent = "On the laptop open the Pair tab, then scan the QR code with this phone.";
+    setPill($("state"), "Not paired", "bad");
+  }
+})();
+</script>
+</body></html>

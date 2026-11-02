@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e1c">
+<title>Pair with NEXUS</title>
+<link rel="stylesheet" href="/static/css/nexus.css">
+</head><body>
+<main class="app">
+  <header class="top"><div class="logo">N</div><div><h1>Pair device</h1><span class="muted">Secure one-time link</span></div></header>
+
+  <section class="card" id="form">
+    <h2>Enter the code from your laptop</h2>
+    <input class="field" id="name" placeholder="Device name (e.g. My Phone)" maxlength="40" autocomplete="off">
+    <input class="field code" id="code" inputmode="numeric" maxlength="6" placeholder="••••••" autocomplete="off">
+    <label class="check"><input type="checkbox" id="trusted"> Trust this device for 30 days</label>
+    <p class="err" id="err"></p>
+    <button class="btn" id="go" style="width:100%">Pair</button>
+  </section>
+
+  <section class="card" id="wait" hidden style="text-align:center">
+    <div class="spin"></div>
+    <h2>Waiting for approval</h2>
+    <p class="muted">Tap <b>Approve</b> on your laptop.</p>
+  </section>
+</main>
+
+<script src="/static/js/common.js"></script>
+<script>
+// The pairing token travels in the URL fragment (#t=...): it is never sent to the server,
+// never written to logs and never leaks through the Referer header.
+const token = new URLSearchParams(location.hash.slice(1)).get("t");
+history.replaceState(null, "", "/pair");          // remove the token from the address bar
+
+if (!token) { $("err").textContent = "Open this page by scanning the QR code on the laptop."; $("go").disabled = true; }
+
+$("code").oninput = e => { e.target.value = e.target.value.replace(/\D/g, "").slice(0, 6); };
+
+$("go").onclick = async () => {
+  $("err").textContent = "";
+  $("go").disabled = true;
+  const v = await api("/api/pairing/verify", "POST", {
+    token, code: $("code").value.trim(),
+    device_name: $("name").value.trim() || "My Phone",
+    trusted: $("trusted").checked,
+  });
+  if (!v.ok) { $("err").textContent = errText(v.data); $("go").disabled = false; return; }
+
+  const claimKey = v.data.claim_key;               // proves "I am the phone that typed the code"
+  $("form").hidden = true; $("wait").hidden = false;
+  const timer = setInterval(async () => {
+    const c = await api("/api/pairing/claim", "POST", { token, claim_key: claimKey });
+    if (!c.ok) {
+      clearInterval(timer);
+      $("wait").hidden = true; $("form").hidden = false;
+      $("err").textContent = errText(c.data); $("go").disabled = false;
+    } else if (c.data.state === "approved") {
+      clearInterval(timer); location.href = "/";
+    }
+  }, 2000);
+};
+</script>
+</body></html>

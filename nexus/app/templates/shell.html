@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e1c">
+<title>NEXUS</title>
+<link rel="stylesheet" href="/static/css/nexus.css">
+</head><body class="shell">
+<iframe id="view" title="NEXUS"></iframe>
+<div id="tray"></div>
+<nav id="dock"></nav>
+
+<script src="/static/js/common.js"></script>
+<script>
+const onLaptop = ["127.0.0.1", "localhost"].includes(location.hostname);
+const TABS = [["/home", "🏠", "Home"], ["/chat", "💬", "Chat"], ["/files", "📁", "Files"]];
+if (onLaptop) TABS.push(["/pairing", "🔗", "Pair"]);
+const view = $("view"), dock = $("dock"), tray = $("tray");
+
+// ---------- tabs (pages load in the frame, so this page, and its transfers, never reload) ----------
+for (const [href, icon, label] of TABS) {
+  const a = document.createElement("a");
+  a.href = href; a.dataset.path = href;
+  const i = document.createElement("span"); i.textContent = icon;
+  const t = document.createElement("small"); t.textContent = label;
+  a.append(i, t);
+  a.onclick = e => { e.preventDefault(); view.src = href; };
+  dock.appendChild(a);
+}
+view.addEventListener("load", () => {
+  let p = "/home";
+  try { p = view.contentWindow.location.pathname; } catch {}
+  dock.querySelectorAll("a").forEach(a => a.classList.toggle("on", a.dataset.path === p));
+  history.replaceState(null, "", "/#" + p);
+});
+const wanted = location.hash.slice(1);
+view.src = TABS.some(t => t[0] === wanted) ? wanted : "/home";
+
+// ---------- toast cards (updated in place, so buttons never vanish under your finger) ----------
+const cards = new Map();
+function card(key) {
+  let c = cards.get(key);
+  if (c) return c;
+  const root = document.createElement("div"); root.className = "tcard";
+  const tt = document.createElement("div"); tt.className = "tt";
+  const name = document.createElement("span"); name.className = "name";
+  const pct = document.createElement("span");
+  tt.append(name, pct);
+  const sub = document.createElement("div"); sub.className = "sub";
+  const bar = document.createElement("div"); bar.className = "bar";
+  const fill = document.createElement("i"); bar.appendChild(fill);
+  const acts = document.createElement("div"); acts.className = "acts";
+  root.append(tt, sub, bar, acts);
+  tray.appendChild(root);
+  c = { root, name, pct, sub, bar, fill, acts, mode: "" };
+  cards.set(key, c);
+  return c;
+}
+function setActs(c, mode, buttons) {         // rebuild the buttons only when the mode changes
+  if (c.mode === mode) return;
+  c.mode = mode;
+  c.acts.replaceChildren();
+  for (const [label, cls, fn] of buttons) {
+    const b = document.createElement("button");
+    b.className = "btn sm " + cls; b.textContent = label; b.onclick = fn;
+    c.acts.appendChild(b);
+  }
+  c.acts.hidden = buttons.length === 0;
+}
+function drop(key) { const c = cards.get(key); if (c) { c.root.remove(); cards.delete(key); } }
+
+// ---------- transfer manager ----------
+let MAXSIZE = Infinity;
+api("/api/files/limits").then(r => { if (r.ok) MAXSIZE = r.data.max; });
+const jobs = new Map();
+let seq = 0, active = null;
+
+function paintJob(j) {
+  const c = card("job:" + j.id);
+  const running = j.state === "uploading";
+  c.name.textContent = (onLaptop ? "📤 " : "⬆ ") + j.file.name;
+  c.pct.textContent = running ? j.pct + "%" : fmtSize(j.file.size);
+  c.sub.textContent = {
+    waiting: "Waiting for approval on the laptop…",
+    ready: "Approved ✅ · starting soon",
+    uploading: `${onLaptop ? "Sending" : "Uploading"} · ${fmtSize(j.bps)}/s`,
+    done: "Done ✅",
+    failed: j.msg || "Failed",
+    cancelled: j.msg || "Cancelled",
+    rejected: "Rejected on the laptop",
+    expired: "The laptop did not respond",
+  }[j.state] || j.state;
+  c.bar.hidden = !running;
+  c.fill.style.width = j.pct + "%";
+  const open = ["waiting", "ready", "uploading"].includes(j.state);
+  setActs(c, open ? "cancel" : "none", open ? [["Cancel", "danger", () => cancelJob(j)]] : []);
+}
+function finish(j) {
+  if (active === j) active = null;
+  paintJob(j);
+  setTimeout(() => { drop("job:" + j.id); jobs.delete(j.id); }, j.state === "done" ? 3000 : 8000);
+  pump();
+}
+function cancelJob(j) {
+  if (j.state === "uploading" && j.xhr) { j.msg = "Cancelled"; j.xhr.abort(); return; }
+  if (j.state === "waiting" || j.state === "ready") {
+    j.state = "cancelled"; j.msg = "Cancelled";
+    if (j.tid) api(`/api/files/transfers/${j.tid}/abort`, "POST");
+    finish(j);
+  }
+}
+function pump() {
+  if (active) return;
+  const j = [...jobs.values()].find(x => x.state === "ready");
+  if (j) startUpload(j);
+}
+function startUpload(j) {
+  active = j; j.state = "uploading"; j.pct = 0; j.bps = 0;
+  const xhr = new XMLHttpRequest(); j.xhr = xhr;
+  xhr.open("POST", onLaptop ? "/api/files/share" : `/api/files/upload?tid=${encodeURIComponent(j.tid)}`);
+  xhr.setRequestHeader("X-Filename", encodeURIComponent(j.file.name));
+  const t0 = Date.now();
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    j.pct = Math.round(e.loaded / e.total * 100);
+    j.bps = e.loaded / Math.max(1, (Date.now() - t0) / 1000);
+    paintJob(j);
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200) { j.state = "done"; j.pct = 100; }
+    else {
+      let msg = "";
+      try { msg = JSON.parse(xhr.responseText).detail || ""; } catch {}
+      j.msg = msg || "Failed (" + xhr.status + ")";
+      j.state = /^Cancelled/.test(msg) ? "cancelled" : "failed";
+    }
+    finish(j);
+  };
+  xhr.onerror = async () => {
+    j.state = "failed"; j.msg = "Connection lost";
+    if (j.tid) {                             // did the laptop cancel it?
+      const s = await api(`/api/files/transfers/${j.tid}`);
+      if (s.ok && s.data.state === "cancelled") { j.state = "cancelled"; j.msg = "Cancelled by laptop"; }
+    }
+    finish(j);
+  };
+  xhr.onabort = () => { j.state = "cancelled"; j.msg = j.msg || "Cancelled"; finish(j); };
+  xhr.send(j.file);
+  paintJob(j);
+}
+async function requestApproval(j) {
+  const r = await api("/api/files/request", "POST", { name: encodeURIComponent(j.file.name), size: j.file.size });
+  if (!r.ok) { j.state = "failed"; j.msg = errText(r.data); return finish(j); }
+  j.tid = r.data.id;
+  if (r.data.state === "approved") { j.state = "ready"; paintJob(j); return pump(); }
+  paintJob(j);
+  const timer = setInterval(async () => {   // quick poll: works even if the live link is down
+    if (j.state !== "waiting") return clearInterval(timer);
+    const s = await api(`/api/files/transfers/${j.tid}`);
+    if (s.status === 401) { clearInterval(timer); j.state = "failed"; j.msg = "Not paired"; return finish(j); }
+    if (!s.ok) return;
+    if (s.data.state === "approved") { clearInterval(timer); j.state = "ready"; paintJob(j); pump(); }
+    else if (["rejected", "expired", "cancelled"].includes(s.data.state)) {
+      clearInterval(timer); j.state = s.data.state; finish(j);
+    }
+  }, 1000);
+}
+function addJob(file) {
+  const j = { id: ++seq, file, state: onLaptop ? "ready" : "waiting", pct: 0, bps: 0, tid: null, xhr: null, msg: "" };
+  jobs.set(j.id, j);
+  if (file.size > MAXSIZE) { j.state = "failed"; j.msg = "Larger than " + fmtSize(MAXSIZE); return finish(j); }
+  paintJob(j);
+  if (onLaptop) pump(); else requestApproval(j);
+}
+window.NEXUS = { onLaptop, enqueue: files => files.forEach(addJob) };   // the Files page calls this
+
+window.addEventListener("beforeunload", e => {
+  if ([...jobs.values()].some(j => ["waiting", "ready", "uploading"].includes(j.state))) {
+    e.preventDefault(); e.returnValue = "";
+  }
+});
+
+// ---------- laptop: approve / cancel incoming files ----------
+async function decide(id, ok) { await api(`/api/files/transfers/${id}/decide`, "POST", { approve: ok }); refreshIncoming(); }
+async function cancelIncoming(id) { await api(`/api/files/transfers/${id}/cancel`, "POST"); refreshIncoming(); }
+
+async function refreshIncoming() {
+  if (!onLaptop) return;
+  const r = await api("/api/files/transfers");
+  if (!r.ok) return;
+  const keep = new Set();
+  let waiting = 0;
+  for (const t of r.data) {
+    if (t.state === "approved") continue;             // approved, waiting for the phone to start
+    const key = "in:" + t.id; keep.add(key);
+    const c = card(key);
+    if (t.state === "pending") {
+      waiting++;
+      c.name.textContent = "📱 " + t.name;
+      c.pct.textContent = fmtSize(t.size);
+      c.sub.textContent = t.device + " wants to send this file";
+      c.bar.hidden = true;
+      setActs(c, "ask", [["Approve", "", () => decide(t.id, true)], ["Reject", "danger", () => decide(t.id, false)]]);
+    } else {
+      const pct = t.size ? Math.min(100, Math.round(t.received / t.size * 100)) : 0;
+      c.name.textContent = "⬇ " + t.name;
+      c.pct.textContent = pct + "%";
+      c.sub.textContent = `Receiving from ${t.device} · ${fmtSize(t.speed)}/s`;
+      c.bar.hidden = false; c.fill.style.width = pct + "%";
+      setActs(c, "recv", [["Cancel", "danger", () => cancelIncoming(t.id)]]);
+    }
+  }
+  for (const k of [...cards.keys()]) if (k.startsWith("in:") && !keep.has(k)) drop(k);
+  document.title = waiting ? `(${waiting}) Approval needed · NEXUS` : "NEXUS";
+}
+
+// ---------- phone: "laptop shared a file" toast ----------
+function offerDownload(ev) {
+  const key = "dl:" + Date.now();
+  const c = card(key);
+  c.name.textContent = "📥 " + ev.name;
+  c.pct.textContent = fmtSize(ev.size);
+  c.sub.textContent = "Shared from your laptop";
+  c.bar.hidden = true;
+  setActs(c, "dl", [
+    ["Download", "", () => {
+      const a = document.createElement("a");
+      a.href = "/api/files/download/" + encodeURIComponent(ev.name);
+      a.download = ev.name; a.click(); drop(key);
+    }],
+    ["Dismiss", "ghost", () => drop(key)],
+  ]);
+  setTimeout(() => drop(key), 20000);
+}
+
+if (onLaptop) { refreshIncoming(); setInterval(refreshIncoming, 2000); }   // live events + safety poll
+live({
+  transfers: refreshIncoming,
+  files: ev => { if (!onLaptop && ev.direction === "share") offerDownload(ev); },
+  denied: () => {},
+});
+</script>
+</body></html>

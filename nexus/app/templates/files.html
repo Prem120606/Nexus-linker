@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e1c">
+<title>NEXUS Files</title>
+<link rel="stylesheet" href="/static/css/nexus.css">
+</head><body>
+<main class="app">
+  <header class="top">
+    <div class="logo">📁</div>
+    <div><h1>Files</h1><span class="muted" id="limitText"></span></div>
+    <span id="state" class="pill">Ready</span>
+  </header>
+
+  <section class="card">
+    <h2 id="sendTitle">Send</h2>
+    <p class="muted" id="hint"></p>
+    <label class="drop" id="drop" style="margin-top:12px">
+      <b>⬆️</b>
+      Tap to choose files<br><small>or drag them here</small>
+      <input type="file" id="pick" multiple>
+    </label>
+  </section>
+
+  <section class="card">
+    <h2 id="sharedTitle">Shared by laptop</h2>
+    <p class="muted" id="folderHint"></p>
+    <div id="shared"><p class="muted">Loading…</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Transfer history</h2>
+    <p class="muted">The SHA-256 fingerprint proves the file arrived unchanged. On Windows: <span class="mono">Get-FileHash file</span></p>
+    <div id="hist"><p class="muted">Loading…</p></div>
+  </section>
+</main>
+<nav id="tabs"></nav>
+
+<script src="/static/js/common.js"></script>
+<script>
+const onLaptop = ["127.0.0.1", "localhost"].includes(location.hostname);
+$("sendTitle").textContent = onLaptop ? "Send to phone" : "Send to laptop";
+$("hint").textContent = onLaptop
+  ? "Files start sending right away and keep going while you use other tabs."
+  : "The laptop asks you to approve each file. Programs such as .exe and .bat are blocked for safety.";
+$("sharedTitle").textContent = onLaptop ? "Files available to your phone" : "Download from laptop";
+
+api("/api/files/limits").then(r => {
+  if (r.ok) $("limitText").textContent = `Max ${fmtSize(r.data.max)} each · ${fmtSize(r.data.free)} free on laptop`;
+});
+
+function note(box, text) {
+  box.replaceChildren();
+  const p = document.createElement("p"); p.className = "muted"; p.textContent = text; box.appendChild(p);
+}
+
+function send(files) {
+  if (!files.length) return;
+  const mgr = window.parent !== window ? window.parent.NEXUS : null;
+  if (!mgr) return toast("Open NEXUS from the main address", true);
+  mgr.enqueue(files);                       // the shell owns the transfer, so it survives tab changes
+  toast(onLaptop ? "Sending in the background…" : "Waiting for approval on the laptop…");
+}
+$("pick").onchange = () => { const f = [...$("pick").files]; $("pick").value = ""; send(f); };
+const dz = $("drop");
+["dragenter", "dragover"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove("over"); }));
+dz.addEventListener("drop", e => send([...e.dataTransfer.files]));
+
+async function loadShared() {
+  const r = await api("/api/files/shared");
+  const box = $("shared");
+  if (r.status === 401) { note(box, "Not paired. Scan the QR on the laptop."); setPill($("state"), "Not paired", "bad"); return; }
+  if (onLaptop && r.data.folder) $("folderHint").textContent = "You can also drop files straight into: " + r.data.folder;
+  if (!r.data.files.length) return note(box, "Nothing shared yet.");
+  box.replaceChildren();
+  for (const f of r.data.files) {
+    const row = document.createElement("div"); row.className = "item";
+    const left = document.createElement("span"); left.className = "name";
+    left.textContent = `${f.name} (${fmtSize(f.size)})`;
+    row.appendChild(left);
+    if (!onLaptop) {
+      const a = document.createElement("a");
+      a.className = "btn sm"; a.textContent = "Download";
+      a.href = "/api/files/download/" + encodeURIComponent(f.name);
+      a.setAttribute("download", f.name);
+      row.appendChild(a);
+    }
+    box.appendChild(row);
+  }
+}
+
+const ICON = { upload: "⬆", download: "⬇", share: "📤" };
+async function loadHistory() {
+  const r = await api("/api/files/history");
+  const box = $("hist");
+  if (r.status === 401) { note(box, "Not paired."); return; }
+  if (!r.data.length) return note(box, "No transfers yet.");
+  box.replaceChildren();
+  for (const t of r.data) {
+    const row = document.createElement("div"); row.className = "item";
+    const left = document.createElement("span"); left.className = "name";
+    left.textContent = `${ICON[t.direction] || "•"} ${t.filename} (${fmtSize(t.size)})`;
+    if (t.sha256) {
+      const h = document.createElement("span"); h.className = "hash"; h.textContent = "sha256 " + t.sha256;
+      left.appendChild(h);
+    }
+    const right = document.createElement("span");
+    right.className = t.status === "completed" ? "ok-t" : "bad-t";
+    right.textContent = t.status;
+    row.append(left, right); box.appendChild(row);
+  }
+}
+
+loadShared(); loadHistory();
+setInterval(loadShared, 4000);
+live({ files: () => { loadShared(); loadHistory(); }, denied: () => setPill($("state"), "Not paired", "bad") });
+</script>
+</body></html>
